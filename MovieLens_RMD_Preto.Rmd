@@ -1,0 +1,520 @@
+---
+title: "MovieLens Project"
+author: "Anton Preto"
+date: "April 2023"
+output: pdf_document
+---
+
+```{r setup, echo = FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+options(timeout = 120)
+options(digits=5)
+```
+  
+## Executive Summary
+
+This project is part of the HarvardX PH125.9x Data Science: Capstone online course.  
+The aim of the project is to build movie recommendation system using machine learning by creating of a model with sufficient quality in predicting movie. Sufficient quality is defined as a Residual Mean Square Error (RMSE) lower than 0.86490.\
+To create the model we are exploring different approaches and adding biases (movie, user) that has impact on the quality (RMSE) of the model. We are using the 10M version of the MovieLens dataset to make the computation a little easier.\
+We are training a machine learning algorithm using the inputs in one subset to predict movie ratings in the final holdout test set.\
+After comparing 4 different models we were able to find the most suitable model that has sufficient RMSE. The model is using regularization and penalized least squares to predict ratings. Model applied to final test dataset has RMSE of 0.86482.\
+We were able to fulfill the aim of the project.
+
+## Dataset and Methods
+
+Dataset used in this project is the 10M version of the MovieLens by GroupLens and can be downloaded [here](https://files.grouplens.org/datasets/movielens/ml-10m.zip).\
+For computations we are using R version 4.2.2 (The R Project for Statistical Computing) and RStudio Desktop (Open Source Edition AGPL v3) with appropriate packages.
+We are using code provided by the course to generate initial datasets. To develop our algorithms we are using the edx set. For a final test of our final algorithm, we predict movie ratings in the final_holdout_test.
+
+```{r basic dataset, results='hide', echo=FALSE, warning=FALSE, message=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(knitr)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+```
+
+In the next step we are splitting the edx dataset into separate training (90%) and test (10%) dataset.  Typical choices are to use 10% - 20% of the data for testing. We are training our model and testing RMSEs using edx training and edx test dataset.
+
+```{r edx data split, results='hide', echo=FALSE, warning=FALSE, message=FALSE}
+set.seed(1, sample.kind="Rounding") # Using R v4+
+edx_test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE) # p=0.1 define what proportion of the data is represented by the index
+edx_test_index
+
+edx_test <- edx[edx_test_index, ]
+edx_test
+
+edx_train <- edx[-edx_test_index,]
+edx_train
+
+edx_temp <- edx[edx_test_index,]
+
+# Matching userId and movieId in both train and test sets
+edx_test <- edx_temp %>%
+  semi_join(edx_train, by = "movieId") %>%
+  semi_join(edx_train, by = "userId")
+edx_test
+
+# Adding back rows into train set
+edx_removed <- anti_join(edx_temp, edx_test)
+edx_train <- rbind(edx_train, removed)
+edx_train
+
+rm(edx_temp, edx_removed)
+```
+
+To show rating per Genre and Year in edx dataset we need to subtract the Information from "genres" column (separated by "|") and Year from "title" column.
+
+```{r edx year and genre split, results='hide', echo=FALSE}
+edx_sep_genre_year  <- edx  %>% mutate(year = as.numeric(str_sub(title,-5,-2))) %>% separate_rows(genres, sep = "\\|")
+```
+
+After creating datasets we need to inspect them. We see main categories. We are mostly interested ing category (column) "rating".
+
+```{r head edx, echo = FALSE}
+head(edx)
+```
+
+Together there is 10 000 046 ratng observations in edx (9 000 047) and final_holdout_test (999 999) dataset. Median value of rating in edx dataset used for building model is 4 and average is 3.51.
+
+```{r total obs, echo = TRUE}
+length(edx$rating) + length(final_holdout_test$rating)
+median(edx$rating)
+mean(edx$rating)
+```
+
+In edx dataset there is 10 669 unique movies and 69 878 users.
+
+```{r unique movies and users, echo = TRUE}
+edx %>% summarize(number_movies = n_distinct(movieId), number_users = n_distinct(userId))
+```
+
+Most rated movie is Pulp Fiction followed by Forrest Gump, both aired in 1994. Looks like people like to watch and rate movies from 1990s. Pulp Fiction was rated 31 362 times.
+
+```{r most rated movies, echo = FALSE, fig.dim = c(6, 3.5)}
+edx %>%
+  group_by(title) %>%
+  summarize(count = n()) %>%
+  arrange(-count) %>%
+  top_n(10, count) %>%
+  ggplot(aes(count, reorder(title, count))) +
+  geom_bar(color = "black", fill = "#0B625B", stat = "identity") +
+  xlab("Number of Ratings") +
+  ylab(NULL)
+```
+
+From everyday life we already know that people have distinct taste in movies and they can rate them differently according to their taste, genre liking, mood etc.  
+Some genres are rated more often. Most rated genre is Drama.
+
+```{r edx_rating_per_genre, echo = FALSE}
+edx_sep_genre_year%>%
+  group_by(genres) %>%
+  summarize(count = n()) %>%
+  top_n(10, count) %>%
+  arrange(desc(count))
+```
+
+That also means that some people use whole number ratings more often then decimal ratings.  
+79.5% of ratings are whole numbers. Distribution of whole numbers shows that most common rating is 4 (2 588 429 ratings) followed by 3 (2 121 238 ratings).
+
+```{r ratings_whole_num, echo = TRUE}
+sum(edx$rating %% 1 == 0) / length(edx$rating)
+```
+
+```{r ratings_distrib_graph_freq, echo = FALSE, fig.dim = c(6, 3.5)}
+edx %>%
+  ggplot() +
+  aes(rating, y = after_stat(prop)) +           
+  geom_bar(color = "black", fill = "#0B625B") +
+  labs(x = "Ratings", y = "Relative Frequency") +
+  scale_x_continuous(breaks = c(0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5)) + 
+  ggtitle("Distribution of Ratings")
+```
+
+Using distribution graph we can see that the data are skewed, that means that not every person rate same amount of movies. A lot of people rate less than 100 times.
+
+```{r ratings_distrib_graph_rat_vs_user, echo = FALSE, fig.dim = c(6, 3.5)}
+edx %>% 
+  group_by(userId) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(count)) +
+  geom_histogram(color = "black", fill = "#0B625B", bins = 40) +
+  xlab("Ratings: Number") +
+  ylab("Users: Number") +
+  scale_x_log10() +
+  ggtitle("Ratings vs Users")
+```
+
+There is variability of ratings in genres. For example, Film-Noir is a very specific genre, has highest average rating among genres, however was rated only 118 541 times (in comparison with Drama that has the highest number of ratings and the average rating is around 3.65). 
+
+```{r edx_var_ratings_genres, echo = FALSE, fig.dim = c(6, 3.5)}
+edx_sep_genre_year %>% group_by(genres) %>%
+  summarize(n = n(), Average_rating = mean(rating), se = sd(rating)/sqrt(n())) %>%
+  mutate(genres = reorder(genres, Average_rating)) %>%
+  ggplot(aes(x = genres, y = Average_rating, ymin = Average_rating - 2*se, ymax = Average_rating + 2*se)) + 
+  geom_point() +
+  geom_errorbar() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  ggtitle("Variability of ratings in Genres")
+```
+
+We can see that the golden age of movies (according to movie ratings by users amd by year first aired) was between 1940 and 1950 with the average rating of 3.9 out of 5. There is also steep decline of average ratings after 1960.
+
+```{r edx_var_ratings_years, echo = FALSE, message=FALSE, warning=FALSE, fig.dim = c(6, 3.5)}
+edx_sep_genre_year %>% group_by(year) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(aes(year, rating)) +
+  geom_point() +
+  geom_smooth() +
+  ggtitle("Variability of ratings in Years")
+```
+
+## Building movie recommendation system
+
+We are building movie recommendation system from using the simplest to the more advanced techniques and methods. We are comparing systems (models) and its predicting quality with Residual Mean Square Error (RMSE). The RMSE is then defined as:  
+
+$$
+RMSE = \sqrt{\frac{1}{N}\sum_{u,i}^{}(\hat{y}_{u,i}-{y}_{u,i})^{2}}
+$$
+
+It is the typical error we make when predicting a movie rating. If this number is larger than 1, it means our typical error is larger than one star, which is not good.  
+We are using edx, edx test and edx train dataset created.
+
+### Model 1: using only average (mean) of values
+
+Simplest possible Recommendation System. We predict the same rating for all movies regardless of user. From our general knowledge, this method is not sufficient for building of an adequate recommendation system.  
+Model assumes the same rating for all movies and users with all the differences explained by random variation:
+
+$$
+Y_{u,i} = \mu + \epsilon_{u,i}
+$$
+
+The estimate that minimizes the RMSE is the least squares estimate of u and, in this case, is the average of all ratings:
+
+```{r mu computation in edx train dataset, echo = TRUE}
+mu <- mean(edx_train$rating)
+mu
+```
+
+We can predict all unknown ratings with mu and calculate the RMSE.
+
+```{r RMSE_model_1, echo = TRUE}
+RMSE_model_1 <- RMSE(edx_train$rating, mu)
+RMSE_model_1
+```
+
+After adding RMSE of "Model 1: Mean" to Data Frame for RMSE comparison and results we can see that the value is higher than 1.
+
+```{r rmse_comp_model_1, echo = FALSE, warning=FALSE, message=FALSE}
+rmse_comp <- data_frame(Method = "Model 1: Mean", RMSE = RMSE_model_1)
+rmse_comp
+```
+
+After previously inspected data, we see there are some specifics (biases) that can affects the prediction and the ability to correctly predict values, for example:  \
+* different type of movies rated differently (Movie Effect: b_i),\
+* different type of users, taste and their ratings (User Effect: b_u),\
+* different range of ratings - Regularization - Netflix challenge (Regularized Movie and User Effect).
+
+### Model 2: Movie Effect: $b_{i}$
+
+Logic behind this method is that some movies are just generally rated higher than others. To incorporate this, we can add term b_i to represent average ranking for movie i.
+
+$$
+Y_{u,i} = \mu + b_{i} + \epsilon_{u,i}
+$$
+
+First, we are computing Bias based on Movie (b_i).
+
+```{r b_i, results='hide', echo = FALSE}
+b_i <- edx_train %>%
+  group_by(movieId) %>%
+  summarize(b_i = mean(rating - mu))
+```
+
+Using histogram we are showing variation of estimates b_i. Estimates vary substantially.
+
+```{r histogram_b_i, echo = FALSE, fig.dim = c(6, 3.5)}
+b_i %>% ggplot(aes(b_i)) +
+  geom_histogram(color = "black", fill = "#0B625B", bins = 10) +
+  xlab("Movie Effects (Bias)") +
+  ylab("Count") + 
+  ggtitle("Histogram: b_i")
+```
+
+Now we can compute predicted ratings for "Model 2: Movie Effect".
+
+```{r model_2_pred_ratings, results='hide', echo = TRUE}
+model_2_pred_ratings <- edx_test %>% 
+  left_join(b_i, by='movieId') %>%
+  mutate(pred = mu + b_i) %>%
+  pull(pred)
+model_2_pred_ratings
+```
+
+We are using RMSE function to compute RMSE for "Model 2: Movie Effect".
+
+```{r RMSE_model_2, results='hide', echo = TRUE}
+RMSE_model_2 <- RMSE(model_2_pred_ratings, edx_test$rating)
+RMSE_model_2
+```
+
+Adding RMSE of "Model 2: Movie Effect" to Data Frame for RMSE comparison and results.
+
+```{r rmse_comp_model_2, echo = TRUE}
+rmse_comp <- bind_rows(rmse_comp,
+                          data_frame(Method = "Model 2: Movie Effect",  
+                                     RMSE = RMSE_model_2))
+rmse_comp
+```
+
+There is an improvement in RMSE.
+
+### Model 3: User Effect: $b_{u}$ (with Movie Effects) 
+
+There is substantial variability across users (different taste, different ratings). We are incorporating the variability (user-specific effect) by adding term b_u to the equation. 
+
+$$
+Y_{u,i} = \mu + b_{i} + b_{u} + \epsilon_{u,i}
+$$
+
+Again, we need to compute and add Bias based on User (b_u).
+```{r b_u, echo = TRUE}
+b_u <- edx_train %>% 
+  left_join(b_i, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+```
+
+Using histogram we are showing variation of estimates b_u.
+
+```{r histogram_b_u, echo = FALSE, fig.dim = c(6, 3.5)}
+b_u %>% ggplot(aes(b_u)) +
+  geom_histogram(color = "black", fill = "#0B625B", bins = 30) +
+  xlab("User Effects (Bias)") +
+  ylab("Count") + 
+  ggtitle("Histogram: b_u")
+```
+
+Now, we are predicted ratings for "Model 3: Movie + User Effect" using formula below.
+
+```{r model_3_pred_ratings, results='hide', echo = TRUE}
+model_3_pred_ratings <- edx_test %>% 
+  left_join(b_i, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+model_3_pred_ratings
+```
+
+We are using RMSE function to compute RMSE for "Model 3: Movie + User Effect".
+
+```{r RMSE_model_3, results='hide', echo = TRUE}
+RMSE_model_3 <- RMSE(model_3_pred_ratings, edx_test$rating)
+RMSE_model_3
+```
+
+Adding RMSE of "Model 2: Movie Effect" to Data Frame for RMSE comparison and results.
+
+```{r rmse_comp_model_3, echo = TRUE}
+rmse_comp <- bind_rows(rmse_comp,
+                       data_frame(Method = "Model 3: Movie + User Effect",  
+                                  RMSE = RMSE_model_3))
+rmse_comp
+```
+
+There is another improvement in RMSE.
+
+### Model 4: Regularization - Movie and User Effect
+
+Best movies can be rated by very few users and small sample sizes lead to uncertainty. There can be noisy estimates that we should not trust. We need to lower the total variability.  
+Regularization is technique that is used to calibrate machine learning models in order to minimize the adjusted loss function and prevent overfitting or underfitting.
+Regularization permits us to penalize large estimates that are formed using small sample sizes. The general idea behind regularization is to constrain the total variability of the effect sizes.
+We are minimizing an equation that adds a penalty instead of minimizing the least squares equation:  
+
+$$
+\sum_{u,i}(y_{u,i} - \mu - b_{i})^{2} + \lambda\sum_{i}b_{i}^{2}
+$$
+
+We can show that the values of b_i that minimize this equation are:  
+
+$$
+\hat{b}_{i}(\lambda) = \frac{1}{\lambda + n_i}\sum_{u=1}^{n_{i}} (Y_{u,i} - \hat{\mu})
+$$
+
+Lambdas (tuning parameter) defined to compute RMSES (from 0 to 10, addition of 0.25):
+```{r lambdas, echo = TRUE}
+lambdas <- seq(0, 10, 0.25)
+```
+
+We are constructing and using function to find RMSEs for Model 4 (Regularized Movie and User Effects) based on defined Lambdas.
+
+```{r rmses, echo = TRUE}
+rmses <- sapply(lambdas, function(lambda){
+  
+  b_i <- edx_train %>%                    # Movie Effect (Regularized)
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+lambda))
+  
+  b_u <- edx_train %>%                    # Movie and User Effect (Regularized)
+    left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+  
+  model_4_pred_ratings <- edx_test %>%    # Predicted Ratings based on Model 4 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)                    # We want to use predictions based on Model 4
+  
+  return(RMSE(model_4_pred_ratings, edx_test$rating))      # We want RMSE
+})
+```
+
+We continue with selecting the lambda value that minimizes the RMSE (according to graph and data).
+
+```{r plot_lambdas, echo = FALSE, fig.dim = c(6, 3.5)}
+plot(lambdas, rmses, col = "#0B625B")
+```
+
+```{r min_lambda, echo = TRUE}
+lambda_min <- lambdas[which.min(rmses)]
+lambda_min
+```
+
+After defining minimal RMSE for Model 4 we are adding it to comparison table.
+
+```{r RMSE_model_4, echo = TRUE}
+RMSE_model_4 <- min(rmses)
+RMSE_model_4
+```
+
+```{r rmse_comp_model_4, echo = TRUE}
+rmse_comp <- bind_rows(rmse_comp,
+                       data_frame(Method = "Model 4: Regularization: Movie + User Effect",  
+                                  RMSE = RMSE_model_4))
+rmse_comp
+```
+
+There is another slight improvement in RMSE.
+
+### Data comparison anc Conclusion: RMSE of models
+
+We want to use most suitable model (lowest RMSE) to test it using "final_holdout_test" dataset. We are looking for the model with lowest RMSE.  
+Based on previously defined models, we see that lowest RMSE has "Model 4: Regularization: Movie + User Effect".  
+The RMSE for Model 4 is 0.864.  
+To lower the RMSE we could continue for example with new model based on Matrix factorization (possible future work).
+
+## Final model
+
+We are applying "Model 4: Regularization: Movie + User Effect" on "final_holdout_test" dataset. 
+For final model we choose the minimizing lambda computed in "Model 4: Regularization: Movie + User Effect".
+
+```{r min_lambda_final, echo = TRUE}
+lambda_min
+```
+
+Final model is based on "Model 4: Regularization: Movie + User Effect". For training of our model we use full edx dataset and to validate we use final_holdout_test" dataset.  
+First, we are computing average of rating from full edx dataset.
+
+```{r mu_final final, echo = TRUE}
+mu_FINAL <- mean(edx$rating)
+mu_FINAL
+```
+
+We are computing regularized movie (b_i_FINAL) and and user (b_u_FINAL) effect using full edx dataset with lambda that minimizes RMSE.
+
+```{r b_i_FINAL, results='hide', echo = TRUE}
+b_i_FINAL <- edx %>%              
+  group_by(movieId) %>%
+  summarize(b_i_FINAL = sum(rating - mu_FINAL)/(n()+lambda_min))
+```
+
+```{r b_u_FINAL, results='hide', echo = TRUE}
+b_u_FINAL <- edx %>%                                     
+  left_join(b_i_FINAL, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u_FINAL = sum(rating - b_i_FINAL - mu_FINAL)/(n()+lambda_min))
+```
+
+Predicted ratings based on final model.
+
+```{r model_FINAL_pred_ratings, results='hide', echo = TRUE}
+model_FINAL_pred_ratings <- final_holdout_test %>%                 
+  left_join(b_i_FINAL, by = "movieId") %>%
+  left_join(b_u_FINAL, by = "userId") %>%
+  mutate(pred = mu_FINAL + b_i_FINAL + b_u_FINAL) %>%
+  pull(pred)
+```
+
+Now, we are computing and saving RMSE for Final Model: using "final_holdout_test" dataset.
+
+```{r RMSE_model_FINAL, echo = TRUE}
+RMSE_model_FINAL <- RMSE(model_FINAL_pred_ratings, final_holdout_test$rating)
+RMSE_model_FINAL
+```
+
+Final RMSE is 0.86482. Target RMSE by Course is 0.86490. \
+Our final RMSE is below target RMSE that means we achieved our aim.
+
+## References
+* Irizarry RA. Introduction to Data Science : Data Analysis and Prediction Algorithms with R. BC Press. Leanpub; 2019.
